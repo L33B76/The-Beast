@@ -1,0 +1,32 @@
+-- Generado por Ansible. Para jobs y mata sesiones de aplicación antes del switchover.
+-- TODO (DXC): ajustar al mecanismo real de jobs (DBMS_JOB / DBMS_SCHEDULER / job_queue_processes).
+WHENEVER SQLERROR EXIT FAILURE
+SET SERVEROUTPUT ON
+
+-- Evita que arranquen nuevos jobs (en memoria: vuelve al valor del spfile al reiniciar)
+ALTER SYSTEM SET job_queue_processes=0 SCOPE=MEMORY;
+
+DECLARE
+  v_killed PLS_INTEGER := 0;
+BEGIN
+  FOR s IN (SELECT sid, serial#, inst_id
+              FROM gv$session
+             WHERE type = 'USER'
+               AND username IN ({% for u in app_schemas %}'{{ u | upper }}'{{ ',' if not loop.last }}{% endfor %})
+               AND sid <> SYS_CONTEXT('USERENV','SID'))
+  LOOP
+    BEGIN
+      EXECUTE IMMEDIATE 'ALTER SYSTEM KILL SESSION ''' || s.sid || ',' || s.serial# || ',@' || s.inst_id || ''' IMMEDIATE';
+      v_killed := v_killed + 1;
+    EXCEPTION WHEN OTHERS THEN
+      DBMS_OUTPUT.PUT_LINE('No se pudo matar ' || s.sid || ',' || s.serial# || ': ' || SQLERRM);
+    END;
+  END LOOP;
+  DBMS_OUTPUT.PUT_LINE('Sesiones eliminadas: ' || v_killed);
+END;
+/
+
+-- Comprobación: no deben quedar sesiones de aplicación
+SELECT 'REMAINING=' || COUNT(*) FROM gv$session
+ WHERE type = 'USER' AND username IN ({% for u in app_schemas %}'{{ u | upper }}'{{ ',' if not loop.last }}{% endfor %});
+EXIT

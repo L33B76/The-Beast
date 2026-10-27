@@ -1,0 +1,31 @@
+---
+# DR-3.1: parar jobs de BBDD y matar sesiones. Uso: -e run_on=oracle_primary
+- name: Parar jobs de BBDD y matar sesiones
+  hosts: "{{ run_on | default('oracle_primary') }}"
+  become: true
+  become_user: "{{ oracle_os_user }}"
+  gather_facts: false
+  environment:
+    ORACLE_HOME: "{{ oracle_home }}"
+    ORACLE_SID: "{{ oracle_sid }}"
+    PATH: "{{ oracle_home }}/bin:{{ ansible_env.PATH | default('/usr/bin:/bin') }}"
+  tasks:
+    - name: Generar script SQL
+      ansible.builtin.template:
+        src: stop_jobs.sql.j2
+        dest: /tmp/dr_stop_jobs.sql
+        mode: "0600"
+
+    - name: Ejecutar script (jobs y sesiones)
+      ansible.builtin.shell: sqlplus -s / as sysdba @/tmp/dr_stop_jobs.sql
+      register: sql
+      changed_when: true
+
+    - name: Verificar que no quedan sesiones de aplicación
+      ansible.builtin.assert:
+        that: "'REMAINING=0' in sql.stdout"
+        fail_msg: "Quedan sesiones de aplicación activas: {{ sql.stdout }}"
+        success_msg: "Sin sesiones de aplicación"
+
+    - name: Limpiar script temporal
+      ansible.builtin.file: {path: /tmp/dr_stop_jobs.sql, state: absent}

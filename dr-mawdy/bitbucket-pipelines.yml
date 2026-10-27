@@ -1,0 +1,227 @@
+# =============================================================================
+# DR Mawdy LATAM - Bitbucket Pipelines
+#
+# Pipelines (Run pipeline > Custom):
+#   preflight   Comprobaciones previas (solo lectura). Ejecutar semanas antes y el día anterior.
+#   dr-cutover  Conmutación a DR + pruebas + decisión GO.   Variable MODE: dry-run | execute
+#   dr-rollback Vuelta a producción.                        Variable MODE: dry-run | execute
+#   dr-post-go  Tareas posteriores al GO.
+#
+# IMPORTANTE
+#  - Los steps de DR corren en un RUNNER AUTO-ALOJADO dentro de la red (ver README): Bitbucket
+#    cloud no llega a las VMs privadas. Colocar el runner en la región DR (si cae la principal,
+#    un runner en esa región no podría lanzar el failover).
+#  - MODE=execute exige la variable de repositorio DR_ALLOW_EXECUTE=yes (ponerla solo el día D).
+#  - Los steps "✔ Confirmar ..." son manuales: los pulsa el responsable cuando termina su tarea.
+#  - Los logs de auditoría van a logs/*.csv (artefactos) y se imprimen en cada step.
+# =============================================================================
+image: your-registry.azurecr.io/dr-toolbox:1.0   # TODO: imagen construida con docker/Dockerfile
+
+definitions:
+  steps:
+    - step: &dr-base
+        runs-on: [self.hosted, linux, dr]
+        artifacts:
+          - logs/**
+
+pipelines:
+
+  # --- Cada push: validar runbook y scripts (cloud, sin acceso a la red privada) ---
+  default:
+    - step:
+        name: Validar runbook y scripts
+        image: python:3.12-slim
+        script:
+          - pip install -q pyyaml
+          - python3 tools/validate_runbook.py runbook/runbook.yaml
+          - apt-get update -qq && apt-get install -y -qq shellcheck
+          - shellcheck -x scripts/*.sh scripts/lib/*.sh scripts/azure/*.sh
+
+  custom:
+
+    # ------------------------------------------------------------------ PREFLIGHT
+    preflight:
+      - step:
+          <<: *dr-base
+          name: Preflight técnico
+          script:
+            - bash scripts/lib/az-login.sh
+            - python3 tools/run_tasks.py --phase pre --group preflight --mode dry-run --log-dir logs
+
+    # ------------------------------------------------------------------ CUTOVER
+    dr-cutover:
+      - variables:
+          - name: MODE
+            default: dry-run
+            allowed-values: [dry-run, execute]
+
+      - step:
+          <<: *dr-base
+          name: "PRE · Preflight + preparación"
+          script:
+            - bash scripts/lib/az-login.sh
+            - python3 tools/run_tasks.py --phase pre --group preflight,prep --mode "$MODE" --log-dir logs
+
+      - step:
+          <<: *dr-base
+          name: "✔ GO/NO-GO: preparación hecha (PRE-3..6) y autorizo el cutover"
+          trigger: manual
+          script:
+            - python3 tools/run_tasks.py --confirm PRE-3 PRE-4 PRE-5 PRE-6 --log-dir logs
+
+      - step:
+          <<: *dr-base
+          name: "DR 1 · Notificar y parar monitorización"
+          script:
+            - python3 tools/run_tasks.py --phase dr --group start --mode "$MODE" --log-dir logs
+
+      - step:
+          <<: *dr-base
+          name: "✔ Confirmar: monitorización parada (DR-2.1, DR-2.2)"
+          trigger: manual
+          script:
+            - python3 tools/run_tasks.py --confirm DR-2.1 DR-2.2 --log-dir logs
+
+      - parallel:
+          - step:
+              <<: *dr-base
+              name: "DR 2a · AMA: BBDD, switchover y WebLogic"
+              script:
+                - bash scripts/lib/az-login.sh
+                - python3 tools/run_tasks.py --phase dr --group ama-db --mode "$MODE" --log-dir logs
+          - step:
+              <<: *dr-base
+              name: "DR 2b · Phoenix: SQL MI, check DB, Site Recovery"
+              script:
+                - bash scripts/lib/az-login.sh
+                - python3 tools/run_tasks.py --phase dr --group phoenix-infra --mode "$MODE" --log-dir logs
+
+      - step:
+          <<: *dr-base
+          name: "✔ Confirmar: Forms compilado (KMM, DR-3.4) y Phoenix desplegado (CAP, DR-4.4)"
+          trigger: manual
+          script:
+            - python3 tools/run_tasks.py --confirm DR-3.4 DR-4.4 --log-dir logs
+
+      - parallel:
+          - step:
+              <<: *dr-base
+              name: "DR 3a · AMA: startup Forms + pods DRP"
+              script:
+                - python3 tools/run_tasks.py --phase dr --group ama-startup --mode "$MODE" --log-dir logs
+          - step:
+              <<: *dr-base
+              name: "DR 3b · Phoenix: batch + verificación FoG"
+              script:
+                - bash scripts/lib/az-login.sh
+                - python3 tools/run_tasks.py --phase dr --group phoenix-post --mode "$MODE" --log-dir logs
+
+      - step:
+          <<: *dr-base
+          name: "✔ Confirmar: pods DRP instalados (DR-3.6) y wConfigurationV3 -> FoG (DR-4.6)"
+          trigger: manual
+          script:
+            - python3 tools/run_tasks.py --confirm DR-3.6 DR-4.6 --log-dir logs
+
+      - step:
+          <<: *dr-base
+          name: "DR 4 · Batch AMA, Traffic Manager a DR, fin DR"
+          script:
+            - bash scripts/lib/az-login.sh
+            - python3 tools/run_tasks.py --phase dr --group finish --mode "$MODE" --log-dir logs
+
+      - parallel:
+          - step:
+              <<: *dr-base
+              name: "TEST 1a · Smoke AMA"
+              script:
+                - python3 tools/run_tasks.py --phase test --group smoke-ama --mode "$MODE" --log-dir logs
+          - step:
+              <<: *dr-base
+              name: "TEST 1b · Smoke satélites y APIs"
+              script:
+                - python3 tools/run_tasks.py --phase test --group smoke-satellites --mode "$MODE" --log-dir logs
+          - step:
+              <<: *dr-base
+              name: "TEST 1c · Smoke Phoenix"
+              script:
+                - python3 tools/run_tasks.py --phase test --group smoke-phoenix --mode "$MODE" --log-dir logs
+
+      - step:
+          <<: *dr-base
+          name: "TEST 2 · Pruebas de negocio (Operaciones)"
+          script:
+            - python3 tools/run_tasks.py --phase test --group business --mode "$MODE" --log-dir logs
+
+      - step:
+          <<: *dr-base
+          name: "✔ Confirmar: pruebas de negocio OK (TEST-8.1, TEST-8.2)"
+          trigger: manual
+          script:
+            - python3 tools/run_tasks.py --confirm TEST-8.1 TEST-8.2 --log-dir logs
+            - python3 tools/run_tasks.py --phase test --group decision --mode "$MODE" --log-dir logs
+
+      - step:
+          <<: *dr-base
+          name: "✔ GO definitivo (si NO-GO: no pulsar y lanzar dr-rollback)"
+          trigger: manual
+          script:
+            - python3 tools/run_tasks.py --confirm TEST-9 --log-dir logs
+            - python3 tools/report.py --log-dir logs
+
+    # ------------------------------------------------------------------ ROLLBACK
+    dr-rollback:
+      - variables:
+          - name: MODE
+            default: dry-run
+            allowed-values: [dry-run, execute]
+
+      - step:
+          <<: *dr-base
+          name: "RB 1 · Notificar"
+          script:
+            - python3 tools/run_tasks.py --phase rollback --group rb-start --mode "$MODE" --log-dir logs
+
+      - parallel:
+          - step:
+              <<: *dr-base
+              name: "RB 2a · AMA: failback BBDD y reinicio Forms"
+              script:
+                - bash scripts/lib/az-login.sh
+                - python3 tools/run_tasks.py --phase rollback --group rb-ama --mode "$MODE" --log-dir logs
+          - step:
+              <<: *dr-base
+              name: "RB 2b · Phoenix: failback SQL MI, check DB, Site Recovery"
+              script:
+                - bash scripts/lib/az-login.sh
+                - python3 tools/run_tasks.py --phase rollback --group rb-phoenix --mode "$MODE" --log-dir logs
+
+      - step:
+          <<: *dr-base
+          name: "✔ Confirmar: satélites reiniciados contra producción (RB-11.3)"
+          trigger: manual
+          script:
+            - python3 tools/run_tasks.py --confirm RB-11.3 --log-dir logs
+
+      - step:
+          <<: *dr-base
+          name: "RB 3 · Traffic Manager a producción y fin"
+          script:
+            - bash scripts/lib/az-login.sh
+            - python3 tools/run_tasks.py --phase rollback --group rb-finish --mode "$MODE" --log-dir logs
+            - python3 tools/report.py --log-dir logs
+
+    # ------------------------------------------------------------------ POST GO
+    dr-post-go:
+      - step:
+          <<: *dr-base
+          name: "POST · Anunciar tareas post-GO"
+          script:
+            - python3 tools/run_tasks.py --phase postgo --group post --mode dry-run --log-dir logs
+      - step:
+          <<: *dr-base
+          name: "✔ Confirmar: tareas post-GO hechas"
+          trigger: manual
+          script:
+            - python3 tools/run_tasks.py --confirm POST-1.1 POST-1.2 POST-1.3 POST-1.4 POST-1.5 POST-1.6 --log-dir logs
+            - python3 tools/report.py --log-dir logs

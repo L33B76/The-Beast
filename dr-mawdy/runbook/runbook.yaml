@@ -1,0 +1,472 @@
+# =============================================================================
+# Fuente de verdad del runbook DR Mawdy LATAM
+# Migrado de: Runbook_DR_Mawdy_LATAM_v3_1_1.xlsx
+#
+# Notas de la migración:
+#  - IDs normalizados (el Excel tenía IDs duplicados: 3.3 x4, 1.2/1.3 repetidos).
+#  - Las dependencias se han hecho explícitas (en el Excel eran "2", "3,4,5", "6.1,6,2"...).
+#  - Los horarios planificados (Brasil/México/CET) no se migran: los tiempos reales
+#    los genera el runner (tools/report.py).
+#
+# Campos:
+#   type: auto    -> el runner ejecuta `run` (bash). Recibe TASK_ID y DRY_RUN=0|1
+#   type: manual  -> el runner avisa al responsable, deja la tarea MANUAL_PENDING y
+#                    DETIENE el grupo. Se cierra con un step manual: run_tasks.py --confirm
+#   depends_on    -> IDs que deben estar OK/SKIPPED (y aparecer antes en este fichero)
+#   skip: true    -> se registra como SKIPPED (requiere skip_reason)
+# =============================================================================
+meta:
+  name: DR Mawdy LATAM
+  source: Runbook_DR_Mawdy_LATAM_v3_1_1.xlsx
+  version: "3.1.1"
+
+tasks:
+  # ===========================================================================
+  # PRE: comprobaciones y preparación (Previous Tasks + Prerequisites)
+  # ===========================================================================
+  - id: PRE-1
+    phase: pre
+    group: preflight
+    name: Terraform plan de IaC DR Common (detectar deriva)
+    owner: DXC
+    type: auto
+    run: scripts/terraform-plan.sh
+    timeout_min: 20
+
+  - id: PRE-2
+    phase: pre
+    group: preflight
+    name: Preflight técnico (conectividad, secretos, Traffic Manager, FoG, Data Guard)
+    owner: DXC
+    type: auto
+    run: scripts/00-preflight.sh
+    timeout_min: 20
+    depends_on: [PRE-1]
+
+  - id: PRE-3
+    phase: pre
+    group: prep
+    name: Deshabilitar trabajos réplica Wconsolidada
+    owner: Phoenix
+    type: manual
+    instructions: Deshabilitar los trabajos de la réplica Wconsolidada antes del cutover.
+
+  - id: PRE-4
+    phase: pre
+    group: prep
+    name: Deshabilitar Jobs Azure Batch Phoenix (producción)
+    owner: Phoenix
+    type: manual
+    instructions: Deshabilitar los jobs de Azure Batch de Phoenix en la cuenta de producción.
+
+  - id: PRE-5
+    phase: pre
+    group: prep
+    name: Parar clones de DBs
+    owner: DXC
+    type: manual
+    instructions: Parar los clones de BBDD (se paran tras las pruebas).
+
+  - id: PRE-6
+    phase: pre
+    group: prep
+    name: Verificar versiones a desplegar contra config/versions.yaml
+    owner: AMA-KMM
+    type: manual
+    instructions: >
+      KMM confirma que los cambios de Zeus (frontal y satélites/APIs) usan exactamente
+      las versiones de config/versions.yaml.
+
+  # ===========================================================================
+  # DR: conmutación a DR
+  # ===========================================================================
+  - id: DR-1.1
+    phase: dr
+    group: start
+    name: Notificar que las aplicaciones se van a parar
+    owner: Project
+    type: auto
+    run: 'scripts/notify.sh "🔴 DR: inicio del cutover. Las aplicaciones se van a parar."'
+
+  - id: DR-2.1
+    phase: dr
+    group: start
+    name: Parar monitorización /advice On Premise AMA
+    owner: Project
+    type: manual
+    instructions: Parar la monitorización /advice de AMA On Premise (Kyndryl).
+    depends_on: [DR-1.1]
+
+  - id: DR-2.2
+    phase: dr
+    group: start
+    name: Parar monitorización /advice On Premise Phoenix V4
+    owner: Project
+    type: manual
+    instructions: Parar la monitorización /advice de Phoenix V4 On Premise (Kyndryl).
+    depends_on: [DR-1.1]
+
+  # ----- Track AMA y satélites -----
+  - id: DR-3.1
+    phase: dr
+    group: ama-db
+    name: Parar jobs de BBDD y matar sesiones
+    owner: DXC
+    type: auto
+    run: scripts/ansible.sh oracle-stop-jobs.yml -e run_on=oracle_primary
+    depends_on: [DR-2.1, DR-2.2]
+    timeout_min: 30
+    notes: Incidencia previa - los jobs de México impedían pararlos.
+
+  - id: DR-3.2
+    phase: dr
+    group: ama-db
+    name: Switchover de la BBDD de producción (Data Guard)
+    owner: DXC
+    type: auto
+    run: scripts/ansible.sh oracle-switchover.yml -e run_on=oracle_primary -e target_db=$DG_DR_DB
+    depends_on: [DR-3.1]
+    timeout_min: 45
+
+  - id: DR-3.3
+    phase: dr
+    group: ama-db
+    name: Arrancar servidores WebLogic
+    owner: DXC
+    type: auto
+    run: scripts/ansible.sh weblogic-start.yml
+    depends_on: [DR-3.2]
+    timeout_min: 30
+
+  - id: DR-3.4
+    phase: dr
+    group: ama-db
+    name: Compilar Forms (Front End) - KMM / Zeus
+    owner: AMA-KMM
+    type: manual
+    instructions: >
+      Lanzar en Zeus el cambio de frontal (Forms). Verificar que las librerías compiladas
+      se copian a TODOS los nodos (incidencia previa) y que existen wallet y .env de cada país
+      (Ecuador falló por falta de .env).
+    depends_on: [DR-3.3]
+
+  - id: DR-3.5
+    phase: dr
+    group: ama-startup
+    name: Service Startup (reinicio de servidores Forms)
+    owner: DXC
+    type: auto
+    run: scripts/ansible.sh forms-restart.yml
+    depends_on: [DR-3.4]
+    timeout_min: 30
+
+  - id: DR-3.6
+    phase: dr
+    group: ama-startup
+    name: Instalar todos los pods con perfil DRP - KMM / Zeus
+    owner: AMA-KMM
+    type: manual
+    instructions: >
+      Lanzar en Zeus el cambio de satélites/APIs con perfil DRP. Antes de dar OK comprobar:
+      URL LDAP correcta en los pods, config del App Gateway DR, secreto de Redis y KBOLL.
+    depends_on: [DR-3.5]
+
+  - id: DR-3.7
+    phase: dr
+    group: finish
+    name: Habilitar Azure Batch Jobs AMA en cuenta DR
+    owner: DXC
+    type: auto
+    run: scripts/azure/batch-jobs.sh enable ama
+    depends_on: [DR-3.6]
+    notes: Activar C21F30000021 (información datos cartera México).
+
+  # ----- Track Phoenix -----
+  - id: DR-4.1
+    phase: dr
+    group: phoenix-infra
+    name: DB Failover - SQL Managed Instance (Failover Group)
+    owner: DXC
+    type: auto
+    run: scripts/azure/sqlmi-failover.sh dr
+    depends_on: [DR-2.1, DR-2.2]
+    timeout_min: 30
+
+  - id: DR-4.2
+    phase: dr
+    group: phoenix-infra
+    name: Check DB (suspect / offline / emergency / sin acceso)
+    owner: DXC
+    type: auto
+    run: scripts/azure/check-sql-db.sh
+    depends_on: [DR-4.1]
+    timeout_min: 10
+
+  - id: DR-4.3
+    phase: dr
+    group: phoenix-infra
+    name: Mobility Site Recovery (IaaS, Key Vault, Storage Account)
+    owner: DXC
+    type: auto
+    run: scripts/azure/site-recovery.sh dr
+    depends_on: [DR-4.2]
+    timeout_min: 45
+
+  - id: DR-4.4
+    phase: dr
+    group: phoenix-infra
+    name: Desplegar Phoenix y Warranty App
+    owner: CAP
+    type: manual
+    instructions: Desplegar Phoenix & Warranty App en DR.
+    depends_on: [DR-4.3]
+
+  - id: DR-4.5
+    phase: dr
+    group: phoenix-post
+    name: Habilitar Azure Batch Jobs Phoenix en cuenta DR
+    owner: DXC
+    type: auto
+    run: scripts/azure/batch-jobs.sh enable phoenix
+    depends_on: [DR-4.4]
+    notes: ActualizaDivisaMexico y GrupoMutualCR (este último falló en el ensayo y se relanzó).
+
+  - id: DR-4.6
+    phase: dr
+    group: phoenix-post
+    name: Verificar que wConfigurationV3 apunta al FoG
+    owner: CAP
+    type: manual
+    instructions: Revisar que la base wConfigurationV3 apunta al Failover Group (no a una instancia concreta).
+    depends_on: [DR-4.4]
+
+  # ----- Común -----
+  - id: DR-5.1
+    phase: dr
+    group: finish
+    name: Modificar Traffic Manager - tráfico a DR
+    owner: DXC
+    type: auto
+    run: scripts/azure/traffic-manager.sh dr
+    depends_on: [DR-3.7, DR-4.5, DR-4.6]
+    timeout_min: 10
+
+  - id: DR-6
+    phase: dr
+    group: finish
+    name: Fin del proceso DR (notificar)
+    owner: Project
+    type: auto
+    run: 'scripts/notify.sh "🟢 DR: conmutación completada. Comienzan las pruebas técnicas."'
+    depends_on: [DR-5.1]
+
+  # ===========================================================================
+  # TEST: pruebas técnicas y operativas
+  # ===========================================================================
+  - id: TEST-7.1
+    phase: test
+    group: smoke-ama
+    name: Smoke tests AMA
+    owner: AMA-KMM
+    type: auto
+    run: scripts/smoke-tests.sh ama
+    depends_on: [DR-6]
+    timeout_min: 30
+    notes: Las pruebas funcionales (crear asistencia, geolocalización, informes, MAIP 200) siguen siendo manuales.
+
+  - id: TEST-7.2
+    phase: test
+    group: smoke-satellites
+    name: Smoke tests satélites y APIs
+    owner: AMA-KMM
+    type: auto
+    run: scripts/smoke-tests.sh satellites
+    depends_on: [DR-6]
+    timeout_min: 30
+
+  - id: TEST-7.3
+    phase: test
+    group: smoke-phoenix
+    name: Smoke tests Phoenix V4
+    owner: CAP
+    type: auto
+    run: scripts/smoke-tests.sh phoenix
+    depends_on: [DR-6]
+    timeout_min: 30
+
+  - id: TEST-8.1
+    phase: test
+    group: business
+    name: Business / Operation Test AMA
+    owner: Operation Headquarters
+    type: manual
+    instructions: Pruebas de negocio de AMA por parte de Operaciones.
+    depends_on: [TEST-7.1, TEST-7.2]
+
+  - id: TEST-8.2
+    phase: test
+    group: business
+    name: Business / Operation Test Phoenix
+    owner: Operation Headquarters
+    type: manual
+    instructions: Pruebas de negocio de Phoenix por parte de Operaciones.
+    depends_on: [TEST-7.3]
+
+  - id: TEST-9
+    phase: test
+    group: decision
+    name: Decisión final - mantener DR (GO) o ejecutar rollback
+    owner: Project
+    type: manual
+    instructions: Comité decide. Si NO-GO, lanzar el pipeline dr-rollback.
+    depends_on: [TEST-8.1, TEST-8.2]
+
+  # ===========================================================================
+  # ROLLBACK (pipeline independiente: sin dependencias contra el cutover)
+  # ===========================================================================
+  - id: RB-10.1
+    phase: rollback
+    group: rb-start
+    name: Notificar que las aplicaciones se van a parar
+    owner: Project
+    type: auto
+    run: 'scripts/notify.sh "🟠 ROLLBACK: inicio. Las aplicaciones se van a parar."'
+
+  - id: RB-11.1
+    phase: rollback
+    group: rb-ama
+    name: Failback de la BBDD de producción (Data Guard)
+    owner: DXC
+    type: auto
+    run: scripts/ansible.sh oracle-switchover.yml -e run_on=oracle_dr -e target_db=$DG_PROD_DB
+    depends_on: [RB-10.1]
+    timeout_min: 45
+
+  - id: RB-11.2
+    phase: rollback
+    group: rb-ama
+    name: Reiniciar Forms
+    owner: DXC
+    type: auto
+    run: scripts/ansible.sh forms-restart.yml
+    depends_on: [RB-11.1]
+    timeout_min: 30
+
+  - id: RB-11.3
+    phase: rollback
+    group: rb-ama
+    name: Reiniciar satélites
+    owner: DXC
+    type: manual
+    instructions: Reiniciar/redesplegar satélites contra producción (con KMM si hace falta).
+    depends_on: [RB-11.2]
+
+  - id: RB-12.1
+    phase: rollback
+    group: rb-phoenix
+    name: Failback SQL Managed Instance
+    owner: DXC
+    type: auto
+    run: scripts/azure/sqlmi-failover.sh prod
+    depends_on: [RB-10.1]
+    timeout_min: 30
+
+  - id: RB-12.2
+    phase: rollback
+    group: rb-phoenix
+    name: Check DB tras failback
+    owner: DXC
+    type: auto
+    run: scripts/azure/check-sql-db.sh
+    depends_on: [RB-12.1]
+    timeout_min: 10
+
+  - id: RB-12.3
+    phase: rollback
+    group: rb-phoenix
+    name: Mobility Site Recovery (failback)
+    owner: DXC
+    type: auto
+    run: scripts/azure/site-recovery.sh prod
+    depends_on: [RB-12.2]
+    timeout_min: 45
+
+  - id: RB-12.4
+    phase: rollback
+    group: rb-phoenix
+    name: Verificar wConfigurationV3 -> FoG
+    owner: CAP
+    type: manual
+    skip: true
+    skip_reason: Indicado como "no es necesario" en el ensayo.
+    depends_on: [RB-12.3]
+
+  - id: RB-13
+    phase: rollback
+    group: rb-finish
+    name: Modificar Traffic Manager - tráfico a producción
+    owner: DXC
+    type: auto
+    run: scripts/azure/traffic-manager.sh prod
+    depends_on: [RB-11.3, RB-12.4]
+    timeout_min: 10
+
+  - id: RB-14
+    phase: rollback
+    group: rb-finish
+    name: Fin del rollback (notificar)
+    owner: Project
+    type: auto
+    run: 'scripts/notify.sh "🟢 ROLLBACK completado. Tráfico de nuevo en producción."'
+    depends_on: [RB-13]
+
+  # ===========================================================================
+  # POST GO
+  # ===========================================================================
+  - id: POST-1.1
+    phase: postgo
+    group: post
+    name: Arrancar monitorización AMA
+    owner: Kyndryl - Monitorización
+    type: manual
+    instructions: Arrancar la monitorización de la app AMA.
+
+  - id: POST-1.2
+    phase: postgo
+    group: post
+    name: Arrancar monitorización SMARTDD
+    owner: Kyndryl - Monitorización
+    type: manual
+    instructions: Arrancar la monitorización de SMARTDD.
+
+  - id: POST-1.3
+    phase: postgo
+    group: post
+    name: Arrancar monitorización satélites
+    owner: Kyndryl - Monitorización
+    type: manual
+    instructions: Arrancar la monitorización de los satélites.
+
+  - id: POST-1.4
+    phase: postgo
+    group: post
+    name: Revisar estado de replicación de Hathor
+    owner: DXC
+    type: manual
+    instructions: Revisar el estado de replicación de Hathor.
+
+  - id: POST-1.5
+    phase: postgo
+    group: post
+    name: Activar Batch AMA
+    owner: DXC
+    type: manual
+    instructions: Activar Batch AMA (el Excel indica "DB"; confirmar cuenta/entorno destino).
+
+  - id: POST-1.6
+    phase: postgo
+    group: post
+    name: Activar Batch Phoenix
+    owner: DXC
+    type: manual
+    instructions: Activar Batch Phoenix (confirmar cuenta/entorno destino).

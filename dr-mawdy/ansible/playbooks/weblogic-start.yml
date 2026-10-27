@@ -1,0 +1,17 @@
+---
+# DR-3.3: arrancar servidores WebLogic en DR
+- name: Arrancar WebLogic
+  hosts: weblogic
+  become: true
+  become_user: "{{ oracle_os_user }}"
+  gather_facts: false
+  serial: 1
+  tasks:
+    - name: Arranque
+      ansible.builtin.command: "{{ wl_start_cmd }}"
+      changed_when: true
+
+    - name: Esperar a que escuche el puerto de administración (TODO puerto real)
+      ansible.builtin.wait_for:
+        port: 7001
+        timeout: 300

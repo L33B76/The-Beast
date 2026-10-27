@@ -1,0 +1,25 @@
+---
+# Solo lectura. Valida que Data Guard está listo para switchover. Uso: -e run_on=oracle_primary -e target_db=<db_unique_name>
+- name: Preflight Data Guard
+  hosts: "{{ run_on | default('oracle_primary') }}"
+  become: true
+  become_user: "{{ oracle_os_user }}"
+  gather_facts: false
+  environment:
+    ORACLE_HOME: "{{ oracle_home }}"
+    ORACLE_SID: "{{ oracle_sid }}"
+    PATH: "{{ oracle_home }}/bin:/usr/bin:/bin"
+  tasks:
+    - name: show configuration
+      ansible.builtin.command: dgmgrl -silent / "show configuration"
+      register: cfg
+      changed_when: false
+      check_mode: false
+      failed_when: "'SUCCESS' not in cfg.stdout"
+
+    - name: validate database (switchover)
+      ansible.builtin.command: dgmgrl -silent / "validate database {{ target_db }}"
+      register: val
+      changed_when: false
+      check_mode: false
+      failed_when: val.stdout is not regex('Ready for Switchover:\s+Yes')

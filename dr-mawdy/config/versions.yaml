@@ -1,0 +1,27 @@
+# Versiones a desplegar en DR (tarea 2.0 / 2.1 del runbook original).
+# La 'branch' es la utilizada en las pruebas de DR; 'versionApp' es la que hay en producción.
+ama:
+  global_wl: {default: "v42.01.00_cloud", ecuador: "v42.02.00_cloud"}
+  paises:
+    chile: v42.00.00_cloud
+    ecuador: v42.00.00_cloud
+    rep_dominicana: v42.00.00_cloud
+    colombia: v42.00.00_cloud
+    ca: v39.01.00_cloud
+    venezuela: null          # solo GLOBAL_WL
+    uruguay: v42.00.00_cloud
+    argentina: v42.00.00_cloud
+    brasil: v42.00.00_cloud
+    mexico: v42.00.00_cloud
+satelites:
+  accionamiento:   {branch: v1.3.4, versionApp: v1.7.3}
+  accsmart-be:     {branch: v1.3.3, versionApp: v1.0.38}
+  accsmart-fe:     {branch: v1.3.2, versionApp: v1.0.44}
+  assists-core-be: {branch: v1.6.7, versionApp: v7.31.2}
+  clients-be:      {branch: v1.6.6, versionApp: v5.9.3}
+  docmanager-be:   {branch: v1.3.2, versionApp: v2.7.3}
+  integrator-be:   {branch: v1.4.9, versionApp: 3.3.10_cloud}
+  maiviewer-be:    {branch: v1.3.1, versionApp: v1.0.75}
+  maiviewer-fe:    {branch: v1.3.1, versionApp: v1.0.84}
+  providers-be:    {branch: v1.6.6, versionApp: v3.8.2}
+  smart-be:        {branch: v1.5.7, versionApp: v1.8.5}

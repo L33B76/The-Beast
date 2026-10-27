@@ -1,0 +1,20 @@
+# suite,nombre,url,status_esperado
+# TODO: sustituir las URLs por los endpoints de salud reales en DR.
+ama,AMA login,https://TODO-ama-dr/,200
+satellites,accionamiento,https://TODO-dr/accionamiento/health,200
+satellites,accsmart-be,https://TODO-dr/accsmart-be/health,200
+satellites,accsmart-fe,https://TODO-dr/accsmart-fe/,200
+satellites,assists-core-be,https://TODO-dr/assists-core-be/health,200
+satellites,clients-be,https://TODO-dr/clients-be/health,200
+satellites,docmanager-be,https://TODO-dr/docmanager-be/health,200
+satellites,integrator-be,https://TODO-dr/integrator-be/health,200
+satellites,maiviewer-be,https://TODO-dr/maiviewer-be/health,200
+satellites,maiviewer-fe,https://TODO-dr/maiviewer-fe/,200
+satellites,providers-be,https://TODO-dr/providers-be/health,200
+satellites,smart-be,https://TODO-dr/smart-be/health,200
+satellites,miatracking,https://TODO-dr/miatracking/health,200
+satellites,pwamia,https://TODO-dr/pwamia/,200
+satellites,smartdd,https://TODO-dr/smartdd/health,200
+satellites,management,https://TODO-dr/management/health,200
+phoenix,phoenix v4,https://TODO-phoenix-dr/,200
+phoenix,phoenix api,https://TODO-phoenix-dr/api/health,200

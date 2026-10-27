@@ -1,0 +1,35 @@
+---
+# DR-3.2 (switchover) y RB-11.1 (failback). Se ejecuta en el host que ES primario ahora.
+# Uso: -e run_on=oracle_primary|oracle_dr -e target_db=<db_unique_name del nuevo primario>
+# En --check (dry-run) solo se ejecutan las validaciones de solo lectura.
+- name: Switchover Data Guard
+  hosts: "{{ run_on }}"
+  become: true
+  become_user: "{{ oracle_os_user }}"
+  gather_facts: false
+  environment:
+    ORACLE_HOME: "{{ oracle_home }}"
+    ORACLE_SID: "{{ oracle_sid }}"
+    PATH: "{{ oracle_home }}/bin:/usr/bin:/bin"
+  tasks:
+    - name: Validar que el destino está listo
+      ansible.builtin.command: dgmgrl -silent / "validate database {{ target_db }}"
+      register: val
+      changed_when: false
+      check_mode: false
+      failed_when: val.stdout is not regex('Ready for Switchover:\s+Yes')
+
+    - name: Switchover a {{ target_db }}
+      ansible.builtin.command: dgmgrl -silent / "switchover to {{ target_db }}"
+      register: sw
+      changed_when: true
+      failed_when: "'Switchover succeeded' not in sw.stdout"
+
+    - name: Configuración final en SUCCESS
+      ansible.builtin.command: dgmgrl -silent / "show configuration"
+      register: cfg
+      changed_when: false
+      check_mode: false
+      retries: 6
+      delay: 20
+      until: "'SUCCESS' in cfg.stdout"

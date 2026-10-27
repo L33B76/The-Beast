@@ -1,0 +1,6 @@
+# nombre,host,puerto   (comprobado desde el runner de DR; ataca los fallos del ensayo)
+# TODO: rellenar con los destinos reales
+ldap-dr,TODO-ldap,636
+redis-dr,TODO-redis,6380
+oracle-dr-listener,TODO-oracle-dr,1521
+sqlmi-listener,TODO-fog.TODO-zone.database.windows.net,1433

@@ -1,0 +1,17 @@
+---
+# DR-3.5 / RB-11.2: reiniciar servidores Forms (necesario si no se desplegaron tras la compilación)
+- name: Reiniciar Forms
+  hosts: forms
+  become: true
+  become_user: "{{ oracle_os_user }}"
+  gather_facts: false
+  serial: 1
+  tasks:
+    - name: Reinicio
+      ansible.builtin.command: "{{ forms_restart_cmd }}"
+      changed_when: true
+
+    - name: Esperar al puerto de Forms (TODO puerto real)
+      ansible.builtin.wait_for:
+        port: 9001
+        timeout: 300
